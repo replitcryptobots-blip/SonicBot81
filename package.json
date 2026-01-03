@@ -1,0 +1,31 @@
+{
+  "name": "sonic-mev-arbitrage-bot",
+  "version": "1.0.0",
+  "description": "Production-grade flashloan arbitrage bot for Sonic chain - Termux optimized",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "selftest": "node tests/selftest.js",
+    "dry-run": "DRY_RUN=true node src/index.js"
+  },
+  "keywords": [
+    "mev",
+    "arbitrage",
+    "sonic",
+    "flashloan",
+    "defi",
+    "termux"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ethers": "^6.13.0",
+    "dotenv": "^16.4.0",
+    "pino": "^8.19.0",
+    "pino-pretty": "^10.3.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
