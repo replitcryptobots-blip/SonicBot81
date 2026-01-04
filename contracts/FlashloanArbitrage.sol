@@ -162,7 +162,8 @@ contract FlashloanArbitrage {
         uint256 repayAmount = borrowAmount + flashloanFee;
 
         // Step 1: Swap on DEX1 (token0 -> token1)
-        IERC20(token0).approve(dex1Router, borrowAmount);
+        // Use max approval for gas efficiency on repeated executions
+        IERC20(token0).approve(dex1Router, type(uint256).max);
 
         address[] memory path1 = new address[](2);
         path1[0] = token0;
@@ -179,7 +180,8 @@ contract FlashloanArbitrage {
         uint256 intermediateAmount = amounts1[1];
 
         // Step 2: Swap on DEX2 (token1 -> token0)
-        IERC20(token1).approve(dex2Router, intermediateAmount);
+        // Use max approval for gas efficiency on repeated executions
+        IERC20(token1).approve(dex2Router, type(uint256).max);
 
         address[] memory path2 = new address[](2);
         path2[0] = token1;
@@ -199,7 +201,8 @@ contract FlashloanArbitrage {
         require(finalAmount >= repayAmount, "Arbitrage not profitable");
 
         // Step 4: Repay flashloan
-        IERC20(token0).transfer(flashloanProvider, repayAmount);
+        // Balancer pulls via transferFrom(), so we must approve
+        IERC20(token0).approve(flashloanProvider, repayAmount);
 
         // Step 5: Send profit to owner
         uint256 profit = finalAmount - repayAmount;
