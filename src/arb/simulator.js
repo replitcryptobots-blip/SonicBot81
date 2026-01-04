@@ -19,7 +19,7 @@ export class ArbSimulator {
     this.provider = provider;
     this.minNetProfit = parseAmount(config.profit.minNetProfit, 18);
     this.minNetProfitBps = config.profit.minNetProfitBps;
-    this.maxSlippageBps = config.profit.maxSlippage Bps;
+    this.maxSlippageBps = config.profit.maxSlippageBps;
     this.maxGasGwei = BigInt(config.profit.maxGasGwei) * 1000000000n; // Convert to wei
     this.flashloanFeeBps = config.flashloan.feeBps;
 
@@ -44,9 +44,11 @@ export class ArbSimulator {
       const intermediateAmount = quote1.amountOut;
       const finalAmount = quote2.amountOut;
 
-      // Step 2: Apply slippage to outputs
+      // Step 2: Apply slippage protection
+      // Only apply to final amount (double slippage is too conservative)
+      // Use tighter tolerance for intermediate to catch quote staleness
       const slippageBps = this.maxSlippageBps;
-      const minIntermediate = subtractBps(intermediateAmount, slippageBps);
+      const minIntermediate = subtractBps(intermediateAmount, Math.min(slippageBps, 20)); // Max 0.2% for intermediate
       const minFinalAmount = subtractBps(finalAmount, slippageBps);
 
       // Step 3: Calculate flashloan fee
@@ -142,7 +144,7 @@ export class ArbSimulator {
         execution: {
           minIntermediate: minIntermediate.toString(),
           minFinalAmount: minFinalAmount.toString(),
-          deadline: Math.floor(Date.now() / 1000) + 300, // 5 minutes
+          deadline: Math.floor(Date.now() / 1000) + 60, // 60 seconds (arbitrage must be fast)
           gasLimit: gasEstimate.toString(),
           gasPrice: gasPrice.toString(),
         },

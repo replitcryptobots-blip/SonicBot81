@@ -98,6 +98,9 @@ export function validateConfig() {
     if (!config.flashloan.provider) {
       errors.push('FLASHLOAN_PROVIDER is required for LIVE_MODE');
     }
+    if (!config.flashloan.receiverContract) {
+      errors.push('FLASHLOAN_RECEIVER_CONTRACT is required for LIVE_MODE - deploy contracts/FlashloanArbitrage.sol first');
+    }
     if (!config.baseToken) {
       errors.push('BASE_TOKEN is required for LIVE_MODE');
     }
@@ -134,6 +137,9 @@ export function validateAddresses() {
   }
   if (config.flashloan.provider) {
     toValidate.push({ address: config.flashloan.provider, name: 'FLASHLOAN_PROVIDER' });
+  }
+  if (config.flashloan.receiverContract) {
+    toValidate.push({ address: config.flashloan.receiverContract, name: 'FLASHLOAN_RECEIVER_CONTRACT' });
   }
   if (config.baseToken) {
     toValidate.push({ address: config.baseToken, name: 'BASE_TOKEN' });

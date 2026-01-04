@@ -94,6 +94,7 @@ export function minAmountOut(amountOut, slippageBps) {
 
 /**
  * Calculate swap output using constant product formula (x * y = k)
+ * UniswapV2-compatible: (amountIn * (10000 - fee) * reserveOut) / (reserveIn * 10000 + amountIn * (10000 - fee))
  * @param {bigint} amountIn - Amount of token A
  * @param {bigint} reserveIn - Reserve of token A
  * @param {bigint} reserveOut - Reserve of token B
@@ -105,15 +106,24 @@ export function getAmountOut(amountIn, reserveIn, reserveOut, feeBps = 30) {
     return 0n;
   }
 
-  const amountInWithFee = amountAfterFee(amountIn, feeBps);
+  // Fee multiplier: 10000 - feeBps (e.g., 9970 for 30 bps = 0.3%)
+  const feeMultiplier = BPS_DIVISOR - BigInt(feeBps);
+
+  // amountIn with fee applied
+  const amountInWithFee = amountIn * feeMultiplier;
+
+  // numerator = amountInWithFee * reserveOut
   const numerator = amountInWithFee * reserveOut;
-  const denominator = reserveIn + amountInWithFee;
+
+  // denominator = reserveIn * 10000 + amountInWithFee
+  const denominator = reserveIn * BPS_DIVISOR + amountInWithFee;
 
   return numerator / denominator;
 }
 
 /**
  * Calculate input needed for desired output (constant product)
+ * UniswapV2-compatible: (reserveIn * amountOut * 10000) / ((reserveOut - amountOut) * (10000 - fee)) + 1
  * @param {bigint} amountOut - Desired output
  * @param {bigint} reserveIn - Reserve of token A
  * @param {bigint} reserveOut - Reserve of token B
@@ -125,12 +135,17 @@ export function getAmountIn(amountOut, reserveIn, reserveOut, feeBps = 30) {
     return 0n;
   }
 
-  const numerator = reserveIn * amountOut;
-  const denominator = reserveOut - amountOut;
-  const amountIn = numerator / denominator;
+  if (amountOut >= reserveOut) {
+    throw new Error('Insufficient reserves for desired output');
+  }
 
-  // Add fee back
-  return addBps(amountIn, feeBps);
+  const feeMultiplier = BPS_DIVISOR - BigInt(feeBps);
+
+  const numerator = reserveIn * amountOut * BPS_DIVISOR;
+  const denominator = (reserveOut - amountOut) * feeMultiplier;
+
+  // Add 1 to round up
+  return numerator / denominator + 1n;
 }
 
 /**
