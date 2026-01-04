@@ -179,56 +179,61 @@ export class ArbScanner extends EventEmitter {
       }
 
       try {
-        // Get quotes from both DEXes
-        // Route 1: A -> B on DEX1, B -> A on DEX2
-        const [quote1_AB, quote2_BA] = await Promise.all([
-          dexes[0].getQuote(tokenA, tokenB, tradeSize).catch(() => null),
-          dexes[1].getQuote(tokenB, tokenA, tradeSize).catch(() => null),
-        ]);
+        // ROUTE 1: A -> B on DEX1, B -> A on DEX2
+        // CRITICAL: Second leg must use output from first leg!
+        try {
+          const quote1_AB = await dexes[0].getQuote(tokenA, tokenB, tradeSize);
 
-        if (quote1_AB && quote2_BA) {
-          const opportunity = {
-            blockNumber,
-            timestamp: Date.now(),
-            route: 'forward',
-            tokenA,
-            tokenB,
-            amountIn: tradeSize,
-            dex1: dexes[0].name,
-            dex2: dexes[1].name,
-            quote1: quote1_AB,
-            quote2: quote2_BA,
-          };
+          if (quote1_AB && quote1_AB.amountOut > 0n) {
+            // Second leg: Use output from first leg as input
+            const quote2_BA = await dexes[1].getQuote(tokenB, tokenA, quote1_AB.amountOut);
 
-          // Only emit if there's a potential profit
-          if (quote2_BA.amountOut > tradeSize) {
-            return opportunity;
+            if (quote2_BA && quote2_BA.amountOut > tradeSize) {
+              // Potential profit!
+              return {
+                blockNumber,
+                timestamp: Date.now(),
+                route: 'forward',
+                tokenA,
+                tokenB,
+                amountIn: tradeSize,
+                dex1: dexes[0].name,
+                dex2: dexes[1].name,
+                quote1: quote1_AB,
+                quote2: quote2_BA,
+              };
+            }
           }
+        } catch (err) {
+          logger.debug({ err }, 'Route 1 (forward) quote failed');
         }
 
-        // Route 2: B -> A on DEX1, A -> B on DEX2
-        const [quote1_BA, quote2_AB] = await Promise.all([
-          dexes[0].getQuote(tokenB, tokenA, tradeSize).catch(() => null),
-          dexes[1].getQuote(tokenA, tokenB, tradeSize).catch(() => null),
-        ]);
+        // ROUTE 2: A -> B on DEX2, B -> A on DEX1
+        try {
+          const quote1_AB = await dexes[1].getQuote(tokenA, tokenB, tradeSize);
 
-        if (quote1_BA && quote2_AB) {
-          const opportunity = {
-            blockNumber,
-            timestamp: Date.now(),
-            route: 'reverse',
-            tokenA,
-            tokenB,
-            amountIn: tradeSize,
-            dex1: dexes[0].name,
-            dex2: dexes[1].name,
-            quote1: quote1_BA,
-            quote2: quote2_AB,
-          };
+          if (quote1_AB && quote1_AB.amountOut > 0n) {
+            // Second leg: Use output from first leg as input
+            const quote2_BA = await dexes[0].getQuote(tokenB, tokenA, quote1_AB.amountOut);
 
-          if (quote2_AB.amountOut > tradeSize) {
-            return opportunity;
+            if (quote2_BA && quote2_BA.amountOut > tradeSize) {
+              // Potential profit!
+              return {
+                blockNumber,
+                timestamp: Date.now(),
+                route: 'reverse',
+                tokenA,
+                tokenB,
+                amountIn: tradeSize,
+                dex1: dexes[1].name,
+                dex2: dexes[0].name,
+                quote1: quote1_AB,
+                quote2: quote2_BA,
+              };
+            }
           }
+        } catch (err) {
+          logger.debug({ err }, 'Route 2 (reverse) quote failed');
         }
 
       } catch (err) {

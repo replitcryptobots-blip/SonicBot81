@@ -70,6 +70,7 @@ export const config = {
   flashloan: {
     provider: process.env.FLASHLOAN_PROVIDER || '',
     feeBps: parseNumber(process.env.FLASHLOAN_FEE_BPS, 5),
+    receiverContract: process.env.FLASHLOAN_RECEIVER_CONTRACT || '',
   },
 
   // ════════════════════════════════════════════════════════════

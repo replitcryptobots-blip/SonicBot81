@@ -3,9 +3,11 @@
 // Builds and executes atomic arbitrage transactions
 // ════════════════════════════════════════════════════════════
 
+import { Contract } from 'ethers';
 import { config } from '../config.js';
 import { logger, logTrade } from '../logger.js';
 import { formatAmount } from '../math.js';
+import { FLASHLOAN_ARBITRAGE_ABI } from '../contracts/FlashloanArbitrageABI.js';
 
 /**
  * Circuit Breaker
@@ -214,18 +216,17 @@ export class ArbExecutor {
       logger.info('Transaction signed, broadcasting...');
 
       // Broadcast
-      txHash = await this.provider.sendRawTransaction(signedTx);
+      const txResponse = await this.provider.sendRawTransaction(signedTx);
+
+      // Extract txHash (sendRawTransaction returns the hash directly)
+      txHash = txResponse;
 
       logger.info({ txHash }, 'Transaction broadcast');
 
       // Wait for confirmation (with timeout)
+      // CRITICAL FIX: Must poll for receipt, not just call getTransactionReceipt once
       const confirmationTimeout = 60000; // 60 seconds
-      receipt = await Promise.race([
-        this.provider.getTransactionReceipt(txHash),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Confirmation timeout')), confirmationTimeout)
-        ),
-      ]);
+      receipt = await this.waitForReceipt(txHash, confirmationTimeout);
 
       // Check if transaction succeeded
       const success = receipt && receipt.status === 1;
@@ -310,67 +311,85 @@ export class ArbExecutor {
 
   /**
    * Build atomic transaction
-   * NOTE: This builds a DIRECT flashloan call.
-   * In production, you need a CONTRACT that:
-   * 1. Receives the flashloan
-   * 2. Executes swaps
-   * 3. Repays the loan
-   * 4. Sends profit to your wallet
+   * Uses the deployed FlashloanArbitrage contract
    */
   async buildTransaction(opportunity, simulation) {
-    if (!this.flashloanProvider) {
-      throw new Error('Flashloan provider not configured');
+    // Check if contract is configured
+    const contractAddress = config.flashloan.receiverContract;
+
+    if (!contractAddress) {
+      throw new Error(
+        'FLASHLOAN_RECEIVER_CONTRACT not configured. ' +
+        'Deploy contracts/FlashloanArbitrage.sol and set the address in .env'
+      );
     }
 
-    // WARNING: This is a simplified example
-    // You MUST deploy a flashloan receiver contract that implements the full logic
-    // See VERIFICATION_CHECKLIST.md for details
-
-    logger.warn('═══════════════════════════════════════════════════════');
-    logger.warn('  WARNING: You need a flashloan receiver contract!');
-    logger.warn('  This is a placeholder - deploy your own contract.');
-    logger.warn('═══════════════════════════════════════════════════════');
-
-    const tokens = [opportunity.tokenA];
-    const amounts = [opportunity.amountIn];
-
-    // Encode the arbitrage parameters as userData
-    const userData = this.encodeArbParams(opportunity, simulation);
-
-    // Build flashloan call
-    // NOTE: Replace receiverAddress with your deployed contract!
-    const receiverAddress = this.wallet.address; // PLACEHOLDER
-
-    const flashloanCall = this.flashloanProvider.buildFlashloanCall(
-      receiverAddress,
-      tokens,
-      amounts,
-      userData
+    // Create contract instance
+    const arbContract = new Contract(
+      contractAddress,
+      FLASHLOAN_ARBITRAGE_ABI,
+      this.wallet
     );
 
-    return flashloanCall;
+    // Prepare parameters
+    const token0 = opportunity.tokenA;
+    const token1 = opportunity.tokenB;
+    const amount = opportunity.amountIn;
+    const dex1Name = opportunity.dex1;
+    const dex2Name = opportunity.dex2;
+    const minIntermediate = BigInt(simulation.execution.minIntermediate);
+    const minFinalAmount = BigInt(simulation.execution.minFinalAmount);
+    const deadline = simulation.execution.deadline;
+
+    // Build contract call
+    // This calls executeArbitrage on the deployed contract
+    const calldata = arbContract.interface.encodeFunctionData('executeArbitrage', [
+      token0,
+      token1,
+      amount,
+      dex1Name,
+      dex2Name,
+      minIntermediate,
+      minFinalAmount,
+      deadline
+    ]);
+
+    return {
+      to: contractAddress,
+      data: calldata,
+      value: 0n,
+    };
   }
 
   /**
-   * Encode arbitrage parameters for flashloan receiver
+   * Wait for transaction receipt with polling
+   * @param {string} txHash - Transaction hash
+   * @param {number} timeoutMs - Timeout in milliseconds
+   * @returns {Promise<object>} - Transaction receipt
    */
-  encodeArbParams(opportunity, simulation) {
-    // This is protocol-specific
-    // Your receiver contract should decode this and execute the arbitrage
+  async waitForReceipt(txHash, timeoutMs = 60000) {
+    const startTime = Date.now();
+    const pollInterval = 1000; // Poll every 1 second
 
-    const params = {
-      route: opportunity.route,
-      tokenA: opportunity.tokenA,
-      tokenB: opportunity.tokenB,
-      dex1: opportunity.dex1,
-      dex2: opportunity.dex2,
-      minIntermediate: simulation.execution.minIntermediate,
-      minFinalAmount: simulation.execution.minFinalAmount,
-      deadline: simulation.execution.deadline,
-    };
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const receipt = await this.provider.getTransactionReceipt(txHash);
 
-    // Simple encoding - replace with proper ABI encoding for your contract
-    return Buffer.from(JSON.stringify(params)).toString('hex');
+        if (receipt) {
+          // Receipt found - transaction mined
+          return receipt;
+        }
+
+        // Not mined yet, wait and retry
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      } catch (err) {
+        logger.debug({ err, txHash }, 'Error fetching receipt');
+        // Continue polling
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      }
+    }
+
+    throw new Error(`Transaction receipt timeout after ${timeoutMs}ms`);
   }
 
   /**
