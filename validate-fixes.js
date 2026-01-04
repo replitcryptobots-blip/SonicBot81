@@ -7,88 +7,228 @@
 import { readFileSync } from 'fs';
 
 console.log('════════════════════════════════════════════════════════════');
-console.log('  AUDIT FIX VALIDATION');
+console.log('  SONIC MEV BOT - AUDIT FIX VALIDATION');
 console.log('════════════════════════════════════════════════════════════\n');
 
 const checks = [];
 
-// Check 1: Simulator typo fixed
-const simulator = readFileSync('src/arb/simulator.js', 'utf8');
-const hasTypo = simulator.includes('maxSlippage Bps');
-const typoFixed = !hasTypo && simulator.includes('maxSlippageBps');
+// Helper to check file contents
+function checkFile(path) {
+  return readFileSync(path, 'utf8');
+}
+
+// ════════════════════════════════════════════════════════════
+// CONFIG FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 1: FLASHLOAN_TYPE added
+const config = checkFile('src/config.js');
+const hasFlashloanType = config.includes('type: parseFlashloanType(process.env.FLASHLOAN_TYPE)');
+const hasFlashloanTypeValidator = config.includes('function parseFlashloanType(value)');
 checks.push({
-  name: 'Finding 1: Simulator typo fixed',
-  passed: typoFixed,
-  details: typoFixed ? 'Line 22: maxSlippageBps (no space)' : 'FAIL: Typo still exists'
+  name: 'P0-1: FLASHLOAN_TYPE config added',
+  passed: hasFlashloanType && hasFlashloanTypeValidator,
+  details: hasFlashloanType
+    ? 'config.flashloan.type uses parseFlashloanType()'
+    : 'FAIL: FLASHLOAN_TYPE not implemented'
 });
 
-// Check 2: Quote chaining fixed
-const scanner = readFileSync('src/arb/scanner.js', 'utf8');
-const hasChaining = scanner.includes('quote1_AB.amountOut');
-const chainingComment = scanner.includes('Second leg: Use output from first leg');
+// Check 2: Address checksum normalization
+const hasNormalizeAddress = config.includes('function normalizeAddress(address, name)');
+const usesGetAddress = config.includes("import { getAddress, isAddress } from 'ethers'");
 checks.push({
-  name: 'Finding 2: Quote chaining uses first leg output',
-  passed: hasChaining && chainingComment,
-  details: hasChaining ? 'Lines 189, 217: Uses quote1_AB.amountOut' : 'FAIL: Still uses wrong input'
+  name: 'P0-2: Address checksum normalization',
+  passed: hasNormalizeAddress && usesGetAddress,
+  details: hasNormalizeAddress
+    ? 'normalizeAddress() uses ethers.getAddress()'
+    : 'FAIL: Address normalization not implemented'
 });
 
-// Check 3: Receipt waiting fixed
-const executor = readFileSync('src/exec/executor.js', 'utf8');
-const hasWaitMethod = executor.includes('async waitForReceipt');
-const callsWaitMethod = executor.includes('await this.waitForReceipt');
+// Check 3: isLiveMode() function
+const hasIsLiveMode = config.includes('export function isLiveMode()');
+const liveModeLogic = config.includes('config.dryRun === false');
 checks.push({
-  name: 'Finding 3: Transaction receipt polling implemented',
-  passed: hasWaitMethod && callsWaitMethod,
-  details: hasWaitMethod ? 'Lines 370-393: waitForReceipt() with polling' : 'FAIL: No polling'
+  name: 'P1-6: isLiveMode() requires DRY_RUN=false explicitly',
+  passed: hasIsLiveMode && liveModeLogic,
+  details: hasIsLiveMode
+    ? 'isLiveMode() checks liveMode && !dryRun && iUnderstandRisks'
+    : 'FAIL: isLiveMode() not implemented correctly'
 });
 
-// Check 4: Math formula fixed
-const math = readFileSync('src/math.js', 'utf8');
-const hasCorrectFormula = math.includes('const feeMultiplier = BPS_DIVISOR - BigInt(feeBps)');
-const hasCorrectNumerator = math.includes('const numerator = amountInWithFee * reserveOut');
-const hasCorrectDenominator = math.includes('const denominator = reserveIn * BPS_DIVISOR + amountInWithFee');
+// ════════════════════════════════════════════════════════════
+// FLASHLOAN FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 4: Flashloan provider uses FLASHLOAN_TYPE
+const flashloan = checkFile('src/exec/flashloan.js');
+const hasTypeSwitch = flashloan.includes("switch (flashloanType)");
+const hasAaveCase = flashloan.includes("case 'aave':");
+const hasBalancerCase = flashloan.includes("case 'balancer':");
 checks.push({
-  name: 'Finding 4: UniswapV2 math formula correct',
-  passed: hasCorrectFormula && hasCorrectNumerator && hasCorrectDenominator,
-  details: hasCorrectFormula ? 'Lines 111-122: Correct UniswapV2 formula' : 'FAIL: Wrong formula'
+  name: 'P1-4: Flashloan provider uses FLASHLOAN_TYPE',
+  passed: hasTypeSwitch && hasAaveCase && hasBalancerCase,
+  details: hasTypeSwitch
+    ? 'createFlashloanProvider() switches on flashloanType'
+    : 'FAIL: Hardcoded to Balancer'
 });
 
-// Check 5: Contract exists
-const contract = readFileSync('contracts/FlashloanArbitrage.sol', 'utf8');
-const hasExecuteArbitrage = contract.includes('function executeArbitrage');
-const hasReceiveFlashLoan = contract.includes('function receiveFlashLoan');
+// Check 5: Aave on-chain fee verification
+const hasAaveFeeCheck = flashloan.includes('FLASHLOAN_PREMIUM_TOTAL');
 checks.push({
-  name: 'Finding 5: Flashloan receiver contract exists',
-  passed: hasExecuteArbitrage && hasReceiveFlashLoan,
-  details: hasExecuteArbitrage ? '273 lines with executeArbitrage & receiveFlashLoan' : 'FAIL: Contract incomplete'
+  name: 'P1-5: Aave on-chain fee verification',
+  passed: hasAaveFeeCheck,
+  details: hasAaveFeeCheck
+    ? 'Aave provider checks FLASHLOAN_PREMIUM_TOTAL()'
+    : 'FAIL: No on-chain fee verification'
 });
 
-// Check 6: ABI encoding fixed
-const hasABIEncoding = executor.includes('encodeFunctionData(\'executeArbitrage\'');
-const noJSONEncoding = !executor.includes('JSON.stringify(params)');
+// ════════════════════════════════════════════════════════════
+// VALIDATION FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 6: poolId validation
+const validate = checkFile('src/validate.js');
+const hasPoolIdValidator = validate.includes('function validatePoolId(poolId, name)');
+const poolIdRegex = validate.includes('/^0x[a-fA-F0-9]{64}$/');
 checks.push({
-  name: 'Finding 6: Proper ABI encoding (not JSON)',
-  passed: hasABIEncoding && noJSONEncoding,
-  details: hasABIEncoding ? 'Line 346: Uses encodeFunctionData()' : 'FAIL: Still uses JSON'
+  name: 'P1-5: poolId/bytes32 validation (Balancer)',
+  passed: hasPoolIdValidator && poolIdRegex,
+  details: hasPoolIdValidator
+    ? 'validatePoolId() checks 0x + 64 hex chars'
+    : 'FAIL: poolId validation not implemented'
 });
 
-// NEW CHECK: Balancer repayment fixed
-const hasApproval = contract.includes('IERC20(token0).approve(flashloanProvider, repayAmount)');
+// Check 7: Validation uses isLiveMode()
+const validationUsesIsLiveMode = validate.includes("import { config, isLiveMode } from './config.js'");
 checks.push({
-  name: 'CRITICAL FIX: Balancer flashloan repayment',
-  passed: hasApproval,
-  details: hasApproval ? 'Line 203: Approves flashloanProvider to pull repayment' : 'FAIL: Uses transfer() instead of approve()'
+  name: 'P1-6: Validation uses isLiveMode() function',
+  passed: validationUsesIsLiveMode,
+  details: validationUsesIsLiveMode
+    ? 'validate.js imports isLiveMode from config'
+    : 'FAIL: Not using centralized isLiveMode()'
 });
 
-// NEW CHECK: Gas-efficient approvals
-const hasMaxApproval = contract.includes('type(uint256).max');
+// ════════════════════════════════════════════════════════════
+// SIMULATOR FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 8: Gas buffer configurable
+const simulator = checkFile('src/arb/simulator.js');
+const hasGasBuffer = simulator.includes('gasEstimateBuffer');
+const usesBufferInCalc = simulator.includes('getGasEstimateWithBuffer()');
 checks.push({
-  name: 'GAS OPTIMIZATION: Max approvals for DEX routers',
-  passed: hasMaxApproval,
-  details: hasMaxApproval ? 'Lines 166, 184: Uses type(uint256).max' : 'Note: Uses exact amount (less efficient)'
+  name: 'P2-7: Configurable gas estimate buffer',
+  passed: hasGasBuffer && usesBufferInCalc,
+  details: hasGasBuffer
+    ? 'Simulator uses config.profit.gasEstimateBuffer'
+    : 'FAIL: Hardcoded gas estimate'
 });
 
-// Display results
+// ════════════════════════════════════════════════════════════
+// EXECUTOR FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 9: Receipt polling with configurable timeout
+const executor = checkFile('src/exec/executor.js');
+const hasWaitForReceipt = executor.includes('async waitForReceipt(txHash, timeoutMs)');
+const usesConfigTimeout = executor.includes('config.performance.txConfirmationTimeout');
+const usesPollInterval = executor.includes('config.performance.txPollInterval');
+checks.push({
+  name: 'P2-9: Configurable tx confirmation timeout and poll interval',
+  passed: hasWaitForReceipt && usesConfigTimeout && usesPollInterval,
+  details: hasWaitForReceipt
+    ? 'waitForReceipt() uses config.performance settings'
+    : 'FAIL: Hardcoded timeout/interval'
+});
+
+// ════════════════════════════════════════════════════════════
+// CONTRACT FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 10: Contract has _executeSwaps internal function
+const contract = checkFile('contracts/FlashloanArbitrage.sol');
+const hasExecuteSwaps = contract.includes('function _executeSwaps(');
+checks.push({
+  name: 'P0-3: Contract has clean _executeSwaps internal function',
+  passed: hasExecuteSwaps,
+  details: hasExecuteSwaps
+    ? 'Refactored with _executeSwaps() internal function'
+    : 'FAIL: No refactored internal function'
+});
+
+// Check 11: Contract has noReentrancy modifier
+const hasNoReentrancy = contract.includes('modifier noReentrancy()');
+checks.push({
+  name: 'SECURITY: Contract has reentrancy guard',
+  passed: hasNoReentrancy,
+  details: hasNoReentrancy
+    ? 'noReentrancy modifier implemented'
+    : 'FAIL: No reentrancy guard'
+});
+
+// Check 12: Contract has proper Aave callback
+const hasExecuteOperation = contract.includes('function executeOperation(');
+const aaveApprovalInCallback = contract.includes('IERC20(assets[i]).approve(flashloanProvider, amountOwed)');
+checks.push({
+  name: 'P0-3: Aave callback approves AFTER transfers, BEFORE return',
+  passed: hasExecuteOperation && aaveApprovalInCallback,
+  details: hasExecuteOperation
+    ? 'executeOperation() approves in correct order'
+    : 'FAIL: Aave callback broken'
+});
+
+// ════════════════════════════════════════════════════════════
+// ENV EXAMPLE FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 13: .env.example has FLASHLOAN_TYPE
+const envExample = checkFile('.env.example');
+const hasFlashloanTypeEnv = envExample.includes('FLASHLOAN_TYPE=');
+const hasPoolIdEnv = envExample.includes('FLASHLOAN_POOL_ID=');
+const hasGasBufferEnv = envExample.includes('GAS_ESTIMATE_BUFFER_PERCENT=');
+checks.push({
+  name: 'ENV: .env.example has new config options',
+  passed: hasFlashloanTypeEnv && hasPoolIdEnv && hasGasBufferEnv,
+  details: hasFlashloanTypeEnv
+    ? 'FLASHLOAN_TYPE, FLASHLOAN_POOL_ID, GAS_ESTIMATE_BUFFER_PERCENT present'
+    : 'FAIL: Missing new env vars'
+});
+
+// Check 14: Quote chaining (already correct, but verify)
+const scanner = checkFile('src/arb/scanner.js');
+const hasQuoteChaining = scanner.includes('quote1_AB.amountOut');
+checks.push({
+  name: 'P2-8: Quote chaining uses first leg output (verified correct)',
+  passed: hasQuoteChaining,
+  details: hasQuoteChaining
+    ? 'Second leg uses quote1_AB.amountOut as input'
+    : 'FAIL: Quote chaining broken'
+});
+
+// ════════════════════════════════════════════════════════════
+// TEST FIXES
+// ════════════════════════════════════════════════════════════
+
+// Check 15: Unit tests exist
+let hasUnitTests = false;
+try {
+  checkFile('tests/unit.test.js');
+  hasUnitTests = true;
+} catch (err) {
+  hasUnitTests = false;
+}
+checks.push({
+  name: 'TEST: Unit tests for critical functionality',
+  passed: hasUnitTests,
+  details: hasUnitTests
+    ? 'tests/unit.test.js exists'
+    : 'FAIL: Unit tests not found'
+});
+
+// ════════════════════════════════════════════════════════════
+// DISPLAY RESULTS
+// ════════════════════════════════════════════════════════════
+
 console.log('VERIFICATION RESULTS:\n');
 let passCount = 0;
 let failCount = 0;

@@ -14,6 +14,10 @@ import {
   parseAmount,
 } from '../math.js';
 
+// Base gas estimate for flashloan arbitrage
+// flashloan call + 2 swaps + token approvals + callback
+const BASE_GAS_ESTIMATE = 500000n;
+
 export class ArbSimulator {
   constructor(provider) {
     this.provider = provider;
@@ -22,13 +26,25 @@ export class ArbSimulator {
     this.maxSlippageBps = config.profit.maxSlippageBps;
     this.maxGasGwei = BigInt(config.profit.maxGasGwei) * 1000000000n; // Convert to wei
     this.flashloanFeeBps = config.flashloan.feeBps;
+    this.gasEstimateBuffer = config.profit.gasEstimateBuffer; // Percentage buffer (e.g., 20)
 
     logger.info({
       minNetProfit: config.profit.minNetProfit,
       minNetProfitBps: this.minNetProfitBps,
       maxSlippageBps: this.maxSlippageBps,
       flashloanFeeBps: this.flashloanFeeBps,
+      gasEstimateBuffer: this.gasEstimateBuffer + '%',
     }, 'Simulator initialized');
+  }
+
+  /**
+   * Calculate gas estimate with buffer
+   * @returns {bigint} - Gas estimate with buffer applied
+   */
+  getGasEstimateWithBuffer() {
+    // Apply buffer: gasEstimate * (100 + buffer) / 100
+    const bufferMultiplier = 100n + BigInt(this.gasEstimateBuffer);
+    return (BASE_GAS_ESTIMATE * bufferMultiplier) / 100n;
   }
 
   /**
@@ -55,18 +71,14 @@ export class ArbSimulator {
       const flashloanFee = applyBps(amountIn, this.flashloanFeeBps);
       const totalRepayment = amountIn + flashloanFee;
 
-      // Step 4: Estimate gas cost
+      // Step 4: Estimate gas cost (with configurable buffer)
       let gasCost = 0n;
-      let gasEstimate = 0n;
+      let gasEstimate = this.getGasEstimateWithBuffer();
       let gasPrice = 0n;
 
       try {
         const feeData = await this.provider.getFeeData();
         gasPrice = feeData.gasPrice || feeData.maxFeePerGas || 0n;
-
-        // Estimate: flashloan + 2 swaps + approvals
-        // Conservative: 500k gas
-        gasEstimate = 500000n;
         gasCost = gasEstimate * gasPrice;
       } catch (err) {
         logger.debug({ err }, 'Gas estimation failed');
@@ -140,6 +152,7 @@ export class ArbSimulator {
           profitBps: Number(netProfit * 10000n / amountIn),
           profitPercent: formatBps(Number(netProfit * 10000n / amountIn)),
           slippageBps: slippageBps,
+          gasBufferPercent: this.gasEstimateBuffer,
         },
         execution: {
           minIntermediate: minIntermediate.toString(),
@@ -221,6 +234,7 @@ export class ArbSimulator {
       minNetProfitBps: this.minNetProfitBps,
       maxSlippageBps: this.maxSlippageBps,
       flashloanFeeBps: this.flashloanFeeBps,
+      gasEstimateBuffer: this.gasEstimateBuffer + '%',
     };
   }
 }
