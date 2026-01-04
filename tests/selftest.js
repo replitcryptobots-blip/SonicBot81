@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // ════════════════════════════════════════════════════════════
 // Self-Test Script
-// Validates bot setup without running live
+// Validates bot setup and configuration without running live
 // ════════════════════════════════════════════════════════════
 
-import { config } from '../src/config.js';
+import { config, isLiveMode } from '../src/config.js';
 import { logger } from '../src/logger.js';
 import { createProvider } from '../src/provider.js';
 import { DexRegistry } from '../src/dex/dexRegistry.js';
 import { ArbSimulator } from '../src/arb/simulator.js';
 import { parseAmount } from '../src/math.js';
+import { validatePoolId } from '../src/validate.js';
 
 console.log('');
 console.log('════════════════════════════════════════════════════════════');
@@ -20,6 +21,7 @@ console.log('');
 const tests = [];
 let passCount = 0;
 let failCount = 0;
+let skipCount = 0;
 
 function test(name, fn) {
   tests.push({ name, fn });
@@ -29,9 +31,14 @@ async function runTests() {
   for (const { name, fn } of tests) {
     try {
       console.log(`Testing: ${name}...`);
-      await fn();
-      console.log(`✓ ${name} passed`);
-      passCount++;
+      const result = await fn();
+      if (result === 'SKIP') {
+        console.log(`⊘ ${name} (skipped)`);
+        skipCount++;
+      } else {
+        console.log(`✓ ${name} passed`);
+        passCount++;
+      }
     } catch (err) {
       console.error(`✗ ${name} failed:`, err.message);
       failCount++;
@@ -43,11 +50,65 @@ async function runTests() {
 // TESTS
 // ════════════════════════════════════════════════════════════
 
-test('Config loads', () => {
+test('Config loads correctly', () => {
   if (!config.chainId) throw new Error('Chain ID not loaded');
   if (config.rpcUrls.length === 0) throw new Error('No RPC URLs configured');
+
   console.log(`  Chain ID: ${config.chainId}`);
   console.log(`  RPC URLs: ${config.rpcUrls.length}`);
+  console.log(`  DRY_RUN: ${config.dryRun}`);
+  console.log(`  LIVE_MODE: ${config.liveMode}`);
+  console.log(`  Effective live mode: ${isLiveMode()}`);
+});
+
+test('Safety defaults are correct', () => {
+  // Verify safe defaults
+  if (config.dryRun !== true && !process.env.DRY_RUN) {
+    throw new Error('DRY_RUN should default to true');
+  }
+
+  if (isLiveMode() && !config.iUnderstandRisks) {
+    throw new Error('LIVE mode should not be enabled without I_UNDERSTAND_RISKS');
+  }
+
+  console.log('  Safety defaults verified ✓');
+});
+
+test('Chain ID is Sonic mainnet (146)', () => {
+  if (config.chainId !== 146) {
+    throw new Error(`Expected chain ID 146 (Sonic), got ${config.chainId}`);
+  }
+  console.log('  Chain ID 146 (Sonic mainnet) ✓');
+});
+
+test('FLASHLOAN_TYPE validation', () => {
+  const validTypes = ['none', 'balancer', 'aave'];
+  const flashloanType = config.flashloan.type;
+
+  if (!validTypes.includes(flashloanType)) {
+    throw new Error(`Invalid FLASHLOAN_TYPE: ${flashloanType}`);
+  }
+
+  console.log(`  FLASHLOAN_TYPE: ${flashloanType}`);
+
+  if (flashloanType !== 'none') {
+    if (!config.flashloan.provider) {
+      console.log('  WARNING: FLASHLOAN_PROVIDER not set for non-none type');
+    } else {
+      console.log(`  FLASHLOAN_PROVIDER: ${config.flashloan.provider}`);
+    }
+  }
+});
+
+test('PoolId format validation (if set)', () => {
+  const poolId = config.flashloan.poolId;
+
+  if (poolId) {
+    validatePoolId(poolId, 'FLASHLOAN_POOL_ID');
+    console.log(`  PoolId valid: ${poolId.slice(0, 10)}...`);
+  } else {
+    console.log('  PoolId not set (optional)');
+  }
 });
 
 test('RPC connectivity', async () => {
@@ -63,7 +124,7 @@ test('RPC connectivity', async () => {
     throw new Error(`Chain ID mismatch: expected ${config.chainId}, got ${chainId}`);
   }
 
-  console.log(`  Chain ID: ${chainId} ✓`);
+  console.log(`  Chain ID verified: ${chainId} ✓`);
 
   await provider.destroy();
 });
@@ -77,21 +138,28 @@ test('DEX adapters initialize', async () => {
 
   console.log(`  DEX count: ${dexes.length}`);
   for (const dex of dexes) {
-    console.log(`    - ${dex.name} (fee: ${dex.feeBps} bps)`);
+    const hasRouter = dex.routerAddress ? '✓' : '✗';
+    console.log(`    - ${dex.name} (fee: ${dex.feeBps} bps) Router: ${hasRouter}`);
   }
 
   await provider.destroy();
 });
 
-test('Quote fetching (if configured)', async () => {
+test('Quote fetching (if DEX configured)', async () => {
   if (!config.dex1.router || config.watchTokens.length < 2) {
-    console.log('  Skipped: DEX or tokens not configured');
-    return;
+    console.log('  Skipped: DEX or tokens not fully configured');
+    return 'SKIP';
   }
 
   const provider = await createProvider();
   const dexRegistry = new DexRegistry(provider);
   const dex1 = dexRegistry.getDex('dex1');
+
+  if (!dex1) {
+    console.log('  Skipped: DEX1 not available');
+    await provider.destroy();
+    return 'SKIP';
+  }
 
   const tokenA = config.watchTokens[0];
   const tokenB = config.watchTokens[1];
@@ -107,7 +175,21 @@ test('Quote fetching (if configured)', async () => {
   await provider.destroy();
 });
 
-test('Simulator runs', async () => {
+test('Simulator initializes', async () => {
+  const provider = await createProvider();
+  const simulator = new ArbSimulator(provider);
+
+  const stats = simulator.getStats();
+
+  console.log(`  Min net profit: ${stats.minNetProfit}`);
+  console.log(`  Min net profit BPS: ${stats.minNetProfitBps}`);
+  console.log(`  Max slippage BPS: ${stats.maxSlippageBps}`);
+  console.log(`  Gas buffer: ${stats.gasEstimateBuffer}`);
+
+  await provider.destroy();
+});
+
+test('Simulator handles mock opportunity', async () => {
   const provider = await createProvider();
   const simulator = new ArbSimulator(provider);
 
@@ -171,6 +253,46 @@ test('Logger writes', async () => {
   console.log('  Logger operational ✓');
 });
 
+test('LIVE mode requirements check', () => {
+  if (!isLiveMode()) {
+    console.log('  Running in DRY_RUN mode (safe)');
+    return;
+  }
+
+  // Check LIVE mode requirements
+  const errors = [];
+
+  if (!config.privateKey) {
+    errors.push('PRIVATE_KEY required');
+  }
+
+  if (config.flashloan.type === 'none') {
+    errors.push('FLASHLOAN_TYPE must be set for LIVE mode');
+  }
+
+  if (config.flashloan.type !== 'none' && !config.flashloan.provider) {
+    errors.push('FLASHLOAN_PROVIDER required');
+  }
+
+  if (!config.flashloan.receiverContract) {
+    errors.push('FLASHLOAN_RECEIVER_CONTRACT required');
+  }
+
+  if (!config.dex1.router) {
+    errors.push('DEX1_ROUTER required');
+  }
+
+  if (!config.dex2.router) {
+    errors.push('DEX2_ROUTER required');
+  }
+
+  if (errors.length > 0) {
+    throw new Error('LIVE mode missing: ' + errors.join(', '));
+  }
+
+  console.log('  LIVE mode requirements met ✓');
+});
+
 // ════════════════════════════════════════════════════════════
 // RUN
 // ════════════════════════════════════════════════════════════
@@ -181,7 +303,7 @@ test('Logger writes', async () => {
 
     console.log('');
     console.log('════════════════════════════════════════════════════════════');
-    console.log(`  Results: ${passCount} passed, ${failCount} failed`);
+    console.log(`  Results: ${passCount} passed, ${failCount} failed, ${skipCount} skipped`);
     console.log('════════════════════════════════════════════════════════════');
     console.log('');
 
@@ -189,9 +311,9 @@ test('Logger writes', async () => {
       console.log('✓ All tests passed! Bot is ready to run in DRY_RUN mode.');
       console.log('');
       console.log('Next steps:');
-      console.log('  1. Configure your .env file with real addresses');
+      console.log('  1. Configure your .env file with real Sonic addresses');
       console.log('  2. Run: npm start (will run in DRY_RUN by default)');
-      console.log('  3. Verify the verification checklist before LIVE mode');
+      console.log('  3. Complete the LIVE MODE CHECKLIST before enabling LIVE mode');
       console.log('');
       process.exit(0);
     } else {

@@ -223,9 +223,9 @@ export class ArbExecutor {
 
       logger.info({ txHash }, 'Transaction broadcast');
 
-      // Wait for confirmation (with timeout)
+      // Wait for confirmation (with configurable timeout)
       // CRITICAL FIX: Must poll for receipt, not just call getTransactionReceipt once
-      const confirmationTimeout = 60000; // 60 seconds
+      const confirmationTimeout = config.performance.txConfirmationTimeout;
       receipt = await this.waitForReceipt(txHash, confirmationTimeout);
 
       // Check if transaction succeeded
@@ -363,20 +363,26 @@ export class ArbExecutor {
 
   /**
    * Wait for transaction receipt with polling
+   * Uses configurable timeout and poll interval from config
    * @param {string} txHash - Transaction hash
-   * @param {number} timeoutMs - Timeout in milliseconds
+   * @param {number} timeoutMs - Timeout in milliseconds (default from config)
    * @returns {Promise<object>} - Transaction receipt
    */
-  async waitForReceipt(txHash, timeoutMs = 60000) {
+  async waitForReceipt(txHash, timeoutMs) {
     const startTime = Date.now();
-    const pollInterval = 1000; // Poll every 1 second
+    const timeout = timeoutMs || config.performance.txConfirmationTimeout;
+    const pollInterval = config.performance.txPollInterval;
 
-    while (Date.now() - startTime < timeoutMs) {
+    logger.debug({ txHash, timeout, pollInterval }, 'Waiting for transaction receipt');
+
+    while (Date.now() - startTime < timeout) {
       try {
         const receipt = await this.provider.getTransactionReceipt(txHash);
 
         if (receipt) {
           // Receipt found - transaction mined
+          const elapsed = Date.now() - startTime;
+          logger.debug({ txHash, elapsed, blockNumber: receipt.blockNumber }, 'Receipt received');
           return receipt;
         }
 
@@ -389,7 +395,7 @@ export class ArbExecutor {
       }
     }
 
-    throw new Error(`Transaction receipt timeout after ${timeoutMs}ms`);
+    throw new Error(`Transaction receipt timeout after ${timeout}ms`);
   }
 
   /**
