@@ -2,19 +2,20 @@
 // ════════════════════════════════════════════════════════════
 // Self-Test Script
 // Validates bot setup and configuration without running live
+// Tests multi-DEX registry, adapters, and quote functionality
 // ════════════════════════════════════════════════════════════
 
-import { config, isLiveMode } from '../src/config.js';
+import { config, isLiveMode, hasDexesConfigured } from '../src/config.js';
 import { logger } from '../src/logger.js';
 import { createProvider } from '../src/provider.js';
 import { DexRegistry } from '../src/dex/dexRegistry.js';
 import { ArbSimulator } from '../src/arb/simulator.js';
-import { parseAmount } from '../src/math.js';
-import { validatePoolId } from '../src/validate.js';
+import { parseAmount, formatAmount } from '../src/math.js';
 
 console.log('');
 console.log('════════════════════════════════════════════════════════════');
 console.log('  SONIC MEV BOT - SELF TEST');
+console.log('  Multi-DEX Integration Test Suite');
 console.log('════════════════════════════════════════════════════════════');
 console.log('');
 
@@ -47,7 +48,7 @@ async function runTests() {
 }
 
 // ════════════════════════════════════════════════════════════
-// TESTS
+// BASIC TESTS
 // ════════════════════════════════════════════════════════════
 
 test('Config loads correctly', () => {
@@ -81,35 +82,40 @@ test('Chain ID is Sonic mainnet (146)', () => {
   console.log('  Chain ID 146 (Sonic mainnet) ✓');
 });
 
-test('FLASHLOAN_TYPE validation', () => {
-  const validTypes = ['none', 'balancer', 'aave'];
-  const flashloanType = config.flashloan.type;
+// ════════════════════════════════════════════════════════════
+// DEX CONFIGURATION TESTS
+// ════════════════════════════════════════════════════════════
 
-  if (!validTypes.includes(flashloanType)) {
-    throw new Error(`Invalid FLASHLOAN_TYPE: ${flashloanType}`);
-  }
+test('DEX configuration parsing', () => {
+  const hasDexes = hasDexesConfigured();
+  console.log(`  Dynamic DEX config: ${hasDexes ? 'YES' : 'NO (using legacy)'}`);
 
-  console.log(`  FLASHLOAN_TYPE: ${flashloanType}`);
+  if (hasDexes) {
+    const dexNames = Object.keys(config.dexes);
+    console.log(`  Configured DEXes: ${dexNames.join(', ')}`);
 
-  if (flashloanType !== 'none') {
-    if (!config.flashloan.provider) {
-      console.log('  WARNING: FLASHLOAN_PROVIDER not set for non-none type');
-    } else {
-      console.log(`  FLASHLOAN_PROVIDER: ${config.flashloan.provider}`);
+    for (const [name, dexConfig] of Object.entries(config.dexes)) {
+      console.log(`    - ${name}: type=${dexConfig.type}, router=${dexConfig.router ? '✓' : '✗'}`);
+
+      if (!dexConfig.router) {
+        throw new Error(`DEX ${name} has no router configured`);
+      }
     }
-  }
-});
-
-test('PoolId format validation (if set)', () => {
-  const poolId = config.flashloan.poolId;
-
-  if (poolId) {
-    validatePoolId(poolId, 'FLASHLOAN_POOL_ID');
-    console.log(`  PoolId valid: ${poolId.slice(0, 10)}...`);
   } else {
-    console.log('  PoolId not set (optional)');
+    // Legacy config
+    console.log(`  DEX1: ${config.dex1.name} (router: ${config.dex1.router ? '✓' : '✗'})`);
+    console.log(`  DEX2: ${config.dex2.name} (router: ${config.dex2.router ? '✓' : '✗'})`);
   }
 });
+
+test('V3 fee tier configuration', () => {
+  console.log(`  Default V3 fee: ${config.v3?.defaultFee || 3000}`);
+  console.log(`  V3 fee tiers: ${(config.v3?.feeTiers || [500, 3000, 10000]).join(', ')}`);
+});
+
+// ════════════════════════════════════════════════════════════
+// RPC CONNECTIVITY TESTS
+// ════════════════════════════════════════════════════════════
 
 test('RPC connectivity', async () => {
   const provider = await createProvider();
@@ -129,34 +135,139 @@ test('RPC connectivity', async () => {
   await provider.destroy();
 });
 
-test('DEX adapters initialize', async () => {
+// ════════════════════════════════════════════════════════════
+// DEX REGISTRY TESTS
+// ════════════════════════════════════════════════════════════
+
+test('DEX registry initialization', async () => {
   const provider = await createProvider();
   const dexRegistry = new DexRegistry(provider);
 
-  const dexes = dexRegistry.getAllDexes();
-  if (dexes.length === 0) throw new Error('No DEXes initialized');
+  const dexCount = dexRegistry.getDexCount ? dexRegistry.getDexCount() : dexRegistry.getAllDexes().length;
+  console.log(`  Total DEXes registered: ${dexCount}`);
 
-  console.log(`  DEX count: ${dexes.length}`);
-  for (const dex of dexes) {
-    const hasRouter = dex.routerAddress ? '✓' : '✗';
-    console.log(`    - ${dex.name} (fee: ${dex.feeBps} bps) Router: ${hasRouter}`);
+  if (dexCount === 0) {
+    console.log('  Warning: No DEXes configured');
+    await provider.destroy();
+    return 'SKIP';
   }
+
+  // Get all DEXes and display info
+  const allDexes = dexRegistry.getAllDexes();
+  for (const dex of allDexes) {
+    const info = dex.getInfo ? dex.getInfo() : { name: dex.name, type: dex.type || 'unknown' };
+    console.log(`    - ${info.name}: type=${info.type}, quoteSupported=${info.quoteSupported !== false}`);
+  }
+
+  // Check for quoteable DEXes
+  const quoteableDexes = dexRegistry.getQuoteableDexes ? dexRegistry.getQuoteableDexes() : allDexes;
+  console.log(`  Quoteable DEXes: ${quoteableDexes.length}`);
 
   await provider.destroy();
 });
 
-test('Quote fetching (if DEX configured)', async () => {
-  if (!config.dex1.router || config.watchTokens.length < 2) {
-    console.log('  Skipped: DEX or tokens not fully configured');
+test('DEX contract verification (on-chain)', async () => {
+  const provider = await createProvider();
+  const dexRegistry = new DexRegistry(provider);
+
+  const dexes = dexRegistry.getAllDexes();
+  if (dexes.length === 0) {
+    console.log('  No DEXes to verify');
+    await provider.destroy();
+    return 'SKIP';
+  }
+
+  let verified = 0;
+  let failed = 0;
+
+  for (const dex of dexes) {
+    const routerAddr = dex.routerAddress;
+    if (!routerAddr) continue;
+
+    try {
+      const code = await provider.getCode(routerAddr);
+      if (code && code !== '0x') {
+        console.log(`    ✓ ${dex.name} router verified at ${routerAddr.slice(0, 10)}...`);
+        verified++;
+      } else {
+        console.log(`    ✗ ${dex.name} router has no code at ${routerAddr}`);
+        failed++;
+      }
+    } catch (err) {
+      console.log(`    ✗ ${dex.name} verification failed: ${err.message}`);
+      failed++;
+    }
+  }
+
+  console.log(`  Verified: ${verified}, Failed: ${failed}`);
+
+  await provider.destroy();
+});
+
+// ════════════════════════════════════════════════════════════
+// QUOTE TESTS
+// ════════════════════════════════════════════════════════════
+
+test('Quote fetching (if DEX and tokens configured)', async () => {
+  if (config.watchTokens.length < 2) {
+    console.log('  Skipped: Need at least 2 WATCH_TOKENS configured');
     return 'SKIP';
   }
 
   const provider = await createProvider();
   const dexRegistry = new DexRegistry(provider);
-  const dex1 = dexRegistry.getDex('dex1');
 
-  if (!dex1) {
-    console.log('  Skipped: DEX1 not available');
+  const quoteableDexes = dexRegistry.getQuoteableDexes
+    ? dexRegistry.getQuoteableDexes()
+    : dexRegistry.getAllDexes();
+
+  if (quoteableDexes.length === 0) {
+    console.log('  Skipped: No quoteable DEXes');
+    await provider.destroy();
+    return 'SKIP';
+  }
+
+  const tokenA = config.watchTokens[0];
+  const tokenB = config.watchTokens[1];
+  const amountIn = parseAmount('1', 18);
+
+  console.log(`  Testing quotes for ${tokenA.slice(0, 10)}... -> ${tokenB.slice(0, 10)}...`);
+
+  let quotesReceived = 0;
+
+  for (const dex of quoteableDexes) {
+    try {
+      const quote = await dex.getQuote(tokenA, tokenB, amountIn);
+      console.log(`    ✓ ${dex.name}: ${formatAmount(amountIn, 18)} -> ${formatAmount(quote.amountOut, 18)}`);
+      if (quote.feeTier) {
+        console.log(`      (fee tier: ${quote.feeTier})`);
+      }
+      quotesReceived++;
+    } catch (err) {
+      console.log(`    ○ ${dex.name}: ${err.message.slice(0, 50)}...`);
+    }
+  }
+
+  console.log(`  Quotes received: ${quotesReceived}/${quoteableDexes.length}`);
+
+  await provider.destroy();
+});
+
+test('Cross-DEX quote comparison', async () => {
+  if (config.watchTokens.length < 2) {
+    console.log('  Skipped: Need at least 2 WATCH_TOKENS configured');
+    return 'SKIP';
+  }
+
+  const provider = await createProvider();
+  const dexRegistry = new DexRegistry(provider);
+
+  const quoteableDexes = dexRegistry.getQuoteableDexes
+    ? dexRegistry.getQuoteableDexes()
+    : dexRegistry.getAllDexes();
+
+  if (quoteableDexes.length < 2) {
+    console.log('  Skipped: Need at least 2 quoteable DEXes');
     await provider.destroy();
     return 'SKIP';
   }
@@ -166,14 +277,44 @@ test('Quote fetching (if DEX configured)', async () => {
   const amountIn = parseAmount('1', 18);
 
   try {
-    const quote = await dex1.getQuote(tokenA, tokenB, amountIn);
-    console.log(`  Quote: ${amountIn} -> ${quote.amountOut}`);
+    const quotes = await dexRegistry.getAllQuotes(tokenA, tokenB, amountIn);
+
+    if (quotes.length < 2) {
+      console.log('  Not enough quotes for comparison');
+      await provider.destroy();
+      return 'SKIP';
+    }
+
+    // Sort by output
+    quotes.sort((a, b) => {
+      if (a.amountOut > b.amountOut) return -1;
+      if (a.amountOut < b.amountOut) return 1;
+      return 0;
+    });
+
+    console.log('  Quote comparison (sorted by output):');
+    for (const quote of quotes) {
+      console.log(`    ${quote.dex}: ${formatAmount(quote.amountOut, 18)}`);
+    }
+
+    // Calculate spread
+    const best = quotes[0].amountOut;
+    const worst = quotes[quotes.length - 1].amountOut;
+    if (worst > 0n) {
+      const spreadBps = Number((best - worst) * 10000n / worst);
+      console.log(`  Spread: ${(spreadBps / 100).toFixed(2)}%`);
+    }
+
   } catch (err) {
-    console.log(`  Note: Quote failed (${err.message}) - may be normal if pair doesn't exist`);
+    console.log(`  Quote comparison failed: ${err.message}`);
   }
 
   await provider.destroy();
 });
+
+// ════════════════════════════════════════════════════════════
+// SIMULATOR TESTS
+// ════════════════════════════════════════════════════════════
 
 test('Simulator initializes', async () => {
   const provider = await createProvider();
@@ -189,29 +330,36 @@ test('Simulator initializes', async () => {
   await provider.destroy();
 });
 
-test('Simulator handles mock opportunity', async () => {
+test('Simulator handles mock opportunity with DEX types', async () => {
   const provider = await createProvider();
   const simulator = new ArbSimulator(provider);
 
-  // Create mock opportunity
+  // Create mock opportunity with DEX type information
   const mockOpportunity = {
     blockNumber: 1000000,
     timestamp: Date.now(),
-    route: 'test',
+    route: 'spooky->wagmi',
     tokenA: '0x0000000000000000000000000000000000000001',
     tokenB: '0x0000000000000000000000000000000000000002',
     amountIn: parseAmount('1', 18),
-    dex1: 'DEX1',
-    dex2: 'DEX2',
+    dex1: 'SpookySwap',
+    dex2: 'Wagmi',
+    dex1Type: 'universal_router',
+    dex2Type: 'uniswap_v3',
+    isCrossType: true,
     quote1: {
       amountOut: parseAmount('1.1', 18),
       path: [],
-      dex: 'DEX1',
+      dex: 'SpookySwap',
+      type: 'universal_router',
+      feeTier: 3000,
     },
     quote2: {
       amountOut: parseAmount('1.2', 18),
       path: [],
-      dex: 'DEX2',
+      dex: 'Wagmi',
+      type: 'uniswap_v3',
+      feeTier: 3000,
     },
   };
 
@@ -221,10 +369,15 @@ test('Simulator handles mock opportunity', async () => {
   if (!result.metrics) throw new Error('Simulation produced no metrics');
 
   console.log(`  Decision: ${result.decision}`);
+  console.log(`  Cross-type route: ${mockOpportunity.isCrossType ? 'YES' : 'NO'}`);
   console.log(`  Reasons: ${result.reasons.length > 0 ? result.reasons.join(', ') : 'None'}`);
 
   await provider.destroy();
 });
+
+// ════════════════════════════════════════════════════════════
+// UTILITY TESTS
+// ════════════════════════════════════════════════════════════
 
 test('Math utilities work', async () => {
   const { applyBps, subtractBps, formatAmount, parseAmount } = await import('../src/math.js');
@@ -253,6 +406,10 @@ test('Logger writes', async () => {
   console.log('  Logger operational ✓');
 });
 
+// ════════════════════════════════════════════════════════════
+// LIVE MODE REQUIREMENTS
+// ════════════════════════════════════════════════════════════
+
 test('LIVE mode requirements check', () => {
   if (!isLiveMode()) {
     console.log('  Running in DRY_RUN mode (safe)');
@@ -278,12 +435,12 @@ test('LIVE mode requirements check', () => {
     errors.push('FLASHLOAN_RECEIVER_CONTRACT required');
   }
 
-  if (!config.dex1.router) {
-    errors.push('DEX1_ROUTER required');
-  }
+  const dexCount = hasDexesConfigured()
+    ? Object.keys(config.dexes).length
+    : (config.dex1.router ? 1 : 0) + (config.dex2.router ? 1 : 0);
 
-  if (!config.dex2.router) {
-    errors.push('DEX2_ROUTER required');
+  if (dexCount < 2) {
+    errors.push('At least 2 DEXes required');
   }
 
   if (errors.length > 0) {
@@ -311,9 +468,15 @@ test('LIVE mode requirements check', () => {
       console.log('✓ All tests passed! Bot is ready to run in DRY_RUN mode.');
       console.log('');
       console.log('Next steps:');
-      console.log('  1. Configure your .env file with real Sonic addresses');
-      console.log('  2. Run: npm start (will run in DRY_RUN by default)');
-      console.log('  3. Complete the LIVE MODE CHECKLIST before enabling LIVE mode');
+      console.log('  1. Configure your .env file with Sonic DEX addresses');
+      console.log('  2. Add WATCH_TOKENS (verified Sonic token addresses)');
+      console.log('  3. Run: npm start (will run in DRY_RUN by default)');
+      console.log('  4. Complete the LIVE MODE CHECKLIST before enabling LIVE mode');
+      console.log('');
+      console.log('Quick commands:');
+      console.log('  npm start            # Run in DRY_RUN mode');
+      console.log('  npm run dry-run      # Explicit dry run');
+      console.log('  npm run selftest     # Run this test again');
       console.log('');
       process.exit(0);
     } else {

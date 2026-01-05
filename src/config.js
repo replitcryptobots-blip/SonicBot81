@@ -1,6 +1,7 @@
 // ════════════════════════════════════════════════════════════
 // Configuration Module
 // Loads and validates environment variables with safe defaults
+// Supports dynamic multi-DEX configuration
 // ════════════════════════════════════════════════════════════
 
 import dotenv from 'dotenv';
@@ -38,6 +39,16 @@ function parseNumber(value, defaultValue) {
 function parseList(value, defaultValue = []) {
   if (!value) return defaultValue;
   return value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+/**
+ * Parse comma-separated number list
+ */
+function parseNumberList(value, defaultValue = []) {
+  if (!value) return defaultValue;
+  return value.split(',')
+    .map(s => parseInt(s.trim(), 10))
+    .filter(n => !isNaN(n));
 }
 
 /**
@@ -121,6 +132,104 @@ function validatePoolId(poolId, name) {
 }
 
 /**
+ * Valid DEX types
+ */
+const VALID_DEX_TYPES = ['uniswap_v2', 'uniswap_v3', 'universal_router'];
+
+/**
+ * Parse dynamic DEX configuration from environment
+ * Supports format: DEXES=spooky,wagmi,swapx,shadow
+ * Each DEX has: {NAME}_TYPE, {NAME}_ROUTER, {NAME}_QUOTER, etc.
+ */
+function parseDexConfigs() {
+  const dexList = parseList(process.env.DEXES);
+  const dexConfigs = {};
+
+  // Default V3 settings
+  const v3DefaultFee = parseNumber(process.env.V3_DEFAULT_FEE, 3000);
+  const v3FeeTiers = parseNumberList(process.env.V3_FEE_TIERS, [500, 3000, 10000]);
+
+  for (const dexName of dexList) {
+    const prefix = dexName.toUpperCase();
+
+    // Get DEX type
+    const typeEnv = process.env[`${prefix}_TYPE`];
+    if (!typeEnv) {
+      console.warn(`Warning: ${prefix}_TYPE not set, skipping DEX ${dexName}`);
+      continue;
+    }
+
+    const type = typeEnv.toLowerCase().trim();
+    if (!VALID_DEX_TYPES.includes(type)) {
+      console.warn(`Warning: Invalid type '${type}' for ${dexName}, skipping. Valid: ${VALID_DEX_TYPES.join(', ')}`);
+      continue;
+    }
+
+    // Build config based on type
+    const config = {
+      name: dexName,
+      type,
+      chainId: parseNumber(process.env.CHAIN_ID, 146),
+      feeBps: parseNumber(process.env[`${prefix}_FEE_BPS`], 30),
+    };
+
+    // Type-specific configuration
+    switch (type) {
+      case 'uniswap_v2':
+        config.router = normalizeAddress(
+          process.env[`${prefix}_ROUTER`] || '',
+          `${prefix}_ROUTER`
+        );
+        config.factory = normalizeAddress(
+          process.env[`${prefix}_FACTORY`] || '',
+          `${prefix}_FACTORY`
+        );
+        break;
+
+      case 'uniswap_v3':
+        config.router = normalizeAddress(
+          process.env[`${prefix}_SWAPROUTER02`] || process.env[`${prefix}_ROUTER`] || '',
+          `${prefix}_SWAPROUTER02`
+        );
+        config.quoter = normalizeAddress(
+          process.env[`${prefix}_QUOTERV2`] || process.env[`${prefix}_QUOTER`] || '',
+          `${prefix}_QUOTERV2`
+        );
+        config.factory = normalizeAddress(
+          process.env[`${prefix}_V3_FACTORY`] || process.env[`${prefix}_FACTORY`] || '',
+          `${prefix}_V3_FACTORY`
+        );
+        config.defaultFeeTier = v3DefaultFee;
+        config.feeTiers = v3FeeTiers;
+        break;
+
+      case 'universal_router':
+        config.router = normalizeAddress(
+          process.env[`${prefix}_UNIVERSAL_ROUTER`] || process.env[`${prefix}_ROUTER`] || '',
+          `${prefix}_UNIVERSAL_ROUTER`
+        );
+        config.quoter = normalizeAddress(
+          process.env[`${prefix}_QUOTER`] || '',
+          `${prefix}_QUOTER`
+        );
+        config.defaultFeeTier = v3DefaultFee;
+        config.feeTiers = v3FeeTiers;
+        break;
+    }
+
+    // Validate router is set (required for all types)
+    if (!config.router) {
+      console.warn(`Warning: Router not set for ${dexName}, skipping`);
+      continue;
+    }
+
+    dexConfigs[dexName.toLowerCase()] = config;
+  }
+
+  return dexConfigs;
+}
+
+/**
  * Main configuration object
  * All values loaded from environment with safe defaults
  */
@@ -170,8 +279,11 @@ export const config = {
   },
 
   // ════════════════════════════════════════════════════════════
-  // DEX
+  // DEX (Dynamic multi-DEX configuration)
   // ════════════════════════════════════════════════════════════
+  dexes: parseDexConfigs(),
+
+  // Legacy DEX config for backward compatibility
   dex1: {
     name: process.env.DEX1_NAME || 'DEX1',
     router: normalizeAddress(process.env.DEX1_ROUTER || '', 'DEX1_ROUTER'),
@@ -183,6 +295,12 @@ export const config = {
     router: normalizeAddress(process.env.DEX2_ROUTER || '', 'DEX2_ROUTER'),
     factory: normalizeAddress(process.env.DEX2_FACTORY || '', 'DEX2_FACTORY'),
     feeBps: parseNumber(process.env.DEX2_FEE_BPS, 30),
+  },
+
+  // V3 default settings
+  v3: {
+    defaultFee: parseNumber(process.env.V3_DEFAULT_FEE, 3000),
+    feeTiers: parseNumberList(process.env.V3_FEE_TIERS, [500, 3000, 10000]),
   },
 
   // ════════════════════════════════════════════════════════════
@@ -216,15 +334,24 @@ export const config = {
   },
 
   // ════════════════════════════════════════════════════════════
-  // PERFORMANCE
+  // PERFORMANCE (Termux-optimized)
   // ════════════════════════════════════════════════════════════
   performance: {
     blockPollInterval: parseNumber(process.env.BLOCK_POLL_INTERVAL, 2000),
     rpcTimeout: parseNumber(process.env.RPC_TIMEOUT, 10000),
-    maxConcurrentRequests: parseNumber(process.env.MAX_CONCURRENT_REQUESTS, 3),
-    maxRequestsPerSecond: parseNumber(process.env.MAX_REQUESTS_PER_SECOND, 10),
+    maxConcurrentRequests: parseNumber(process.env.MAX_CONCURRENT_REQUESTS, 2), // Low for Termux
+    maxRequestsPerSecond: parseNumber(process.env.MAX_REQUESTS_PER_SECOND, 5),
+    perDexConcurrentRequests: parseNumber(process.env.PER_DEX_CONCURRENT_REQUESTS, 1),
     txConfirmationTimeout: parseNumber(process.env.TX_CONFIRMATION_TIMEOUT, 60000), // 60s
     txPollInterval: parseNumber(process.env.TX_POLL_INTERVAL, 1000), // 1s
+  },
+
+  // ════════════════════════════════════════════════════════════
+  // ROUTE SCANNING
+  // ════════════════════════════════════════════════════════════
+  routing: {
+    enableCrossTypeRoutes: parseBool(process.env.ENABLE_CROSS_TYPE_ROUTES, true),
+    routeErrorCooldown: parseNumber(process.env.ROUTE_ERROR_COOLDOWN, 30000), // 30s
   },
 
   // ════════════════════════════════════════════════════════════
@@ -260,11 +387,27 @@ export function getSanitizedConfig() {
     ...config,
     privateKey: config.privateKey ? '***REDACTED***' : 'NOT_SET',
     isLiveMode: isLiveMode(),
+    dexCount: Object.keys(config.dexes).length,
+    dexNames: Object.keys(config.dexes),
     flashloan: {
       ...config.flashloan,
       type: config.flashloan.type,
     },
   };
+}
+
+/**
+ * Get list of configured DEXes
+ */
+export function getConfiguredDexes() {
+  return Object.values(config.dexes);
+}
+
+/**
+ * Check if any DEXes are configured
+ */
+export function hasDexesConfigured() {
+  return Object.keys(config.dexes).length > 0;
 }
 
 export default config;

@@ -1,6 +1,7 @@
 // ════════════════════════════════════════════════════════════
 // Executor Module
 // Builds and executes atomic arbitrage transactions
+// Supports multi-type DEX execution (V2, V3, UniversalRouter)
 // ════════════════════════════════════════════════════════════
 
 import { Contract } from 'ethers';
@@ -139,13 +140,17 @@ export class ArbExecutor {
     logger.info('  DRY RUN - No real transaction will be sent');
     logger.info('═══════════════════════════════════════════════════════');
 
-    logger.info({
+    // Build detailed execution info including DEX types
+    const executionInfo = {
       opportunity: {
         route: opportunity.route,
         tokenA: opportunity.tokenA,
         tokenB: opportunity.tokenB,
         dex1: opportunity.dex1,
+        dex1Type: opportunity.dex1Type || 'uniswap_v2',
         dex2: opportunity.dex2,
+        dex2Type: opportunity.dex2Type || 'uniswap_v2',
+        isCrossType: opportunity.isCrossType || false,
         amountIn: formatAmount(opportunity.amountIn, 18),
       },
       simulation: {
@@ -153,7 +158,17 @@ export class ArbExecutor {
         profitPercent: simulation.metrics.profitPercent,
         gasCost: simulation.metrics.gasCostFormatted,
       },
-    }, 'Would execute arbitrage');
+    };
+
+    // Add fee tier info for V3/UniversalRouter
+    if (opportunity.quote1?.feeTier) {
+      executionInfo.opportunity.quote1FeeTier = opportunity.quote1.feeTier;
+    }
+    if (opportunity.quote2?.feeTier) {
+      executionInfo.opportunity.quote2FeeTier = opportunity.quote2.feeTier;
+    }
+
+    logger.info(executionInfo, 'Would execute arbitrage');
 
     // Log to trades file
     await logTrade({
@@ -312,6 +327,7 @@ export class ArbExecutor {
   /**
    * Build atomic transaction
    * Uses the deployed FlashloanArbitrage contract
+   * Supports V2, V3, and UniversalRouter DEX types
    */
   async buildTransaction(opportunity, simulation) {
     // Check if contract is configured
@@ -341,8 +357,22 @@ export class ArbExecutor {
     const minFinalAmount = BigInt(simulation.execution.minFinalAmount);
     const deadline = simulation.execution.deadline;
 
+    // Include DEX type information for contract routing
+    const dex1Type = opportunity.dex1Type || 'uniswap_v2';
+    const dex2Type = opportunity.dex2Type || 'uniswap_v2';
+
+    // Get fee tiers for V3 swaps (if applicable)
+    const dex1FeeTier = opportunity.quote1?.feeTier || 3000;
+    const dex2FeeTier = opportunity.quote2?.feeTier || 3000;
+
+    logger.debug({
+      dex1: { name: dex1Name, type: dex1Type, feeTier: dex1FeeTier },
+      dex2: { name: dex2Name, type: dex2Type, feeTier: dex2FeeTier },
+    }, 'Building transaction with DEX types');
+
     // Build contract call
     // This calls executeArbitrage on the deployed contract
+    // Note: The contract needs to handle different DEX types
     const calldata = arbContract.interface.encodeFunctionData('executeArbitrage', [
       token0,
       token1,
@@ -359,6 +389,31 @@ export class ArbExecutor {
       data: calldata,
       value: 0n,
     };
+  }
+
+  /**
+   * Build individual swap calldata for a DEX
+   * Used for direct execution without flashloan contract
+   * @param {object} dex - DEX adapter
+   * @param {string} tokenIn - Input token
+   * @param {string} tokenOut - Output token
+   * @param {bigint} amountIn - Input amount
+   * @param {bigint} minAmountOut - Minimum output
+   * @param {string} recipient - Recipient address
+   * @param {number} deadline - Unix timestamp deadline
+   * @param {number} [feeTier] - Fee tier (for V3/UniversalRouter)
+   * @returns {{to: string, data: string, value: bigint}}
+   */
+  buildSwapCalldata(dex, tokenIn, tokenOut, amountIn, minAmountOut, recipient, deadline, feeTier = null) {
+    return dex.buildSwapCalldata(
+      tokenIn,
+      tokenOut,
+      amountIn,
+      minAmountOut,
+      recipient,
+      deadline,
+      feeTier
+    );
   }
 
   /**
