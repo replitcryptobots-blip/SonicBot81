@@ -284,10 +284,13 @@ export class UniversalRouterAdapter {
     const path = this.encodePath([tokenIn, tokenOut], [fee]);
 
     // Encode the V3_SWAP_EXACT_IN command input
+    // AUDIT FIX: payerIsUser must be true for standard ERC20 approve+swap flow
+    // payerIsUser=true: router pulls tokens from msg.sender via transferFrom
+    // payerIsUser=false: router uses internal balance (requires prior PERMIT2 deposit)
     const abiCoder = AbiCoder.defaultAbiCoder();
     const input = abiCoder.encode(
       ['address', 'uint256', 'uint256', 'bytes', 'bool'],
-      [recipient, amountIn, minAmountOut, path, false] // false = tokens not from msg.sender
+      [recipient, amountIn, minAmountOut, path, true] // true = tokens from msg.sender (standard flow)
     );
 
     // Command byte
@@ -326,10 +329,11 @@ export class UniversalRouterAdapter {
     const path = [tokenIn, tokenOut];
 
     // Encode the V2_SWAP_EXACT_IN command input
+    // AUDIT FIX: payerIsUser must be true for standard ERC20 approve+swap flow
     const abiCoder = AbiCoder.defaultAbiCoder();
     const input = abiCoder.encode(
       ['address', 'uint256', 'uint256', 'address[]', 'bool'],
-      [recipient, amountIn, minAmountOut, path, false]
+      [recipient, amountIn, minAmountOut, path, true] // true = tokens from msg.sender
     );
 
     // Command byte
@@ -369,10 +373,11 @@ export class UniversalRouterAdapter {
     if (fees && fees.length > 0) {
       const path = this.encodePath(tokens, fees);
 
+      // AUDIT FIX: payerIsUser must be true for standard ERC20 approve+swap flow
       const abiCoder = AbiCoder.defaultAbiCoder();
       const input = abiCoder.encode(
         ['address', 'uint256', 'uint256', 'bytes', 'bool'],
-        [recipient, amountIn, minAmountOut, path, false]
+        [recipient, amountIn, minAmountOut, path, true] // true = tokens from msg.sender
       );
 
       const commands = solidityPacked(['uint8'], [Commands.V3_SWAP_EXACT_IN]);
@@ -392,10 +397,11 @@ export class UniversalRouterAdapter {
     }
 
     // V2-style multi-hop
+    // AUDIT FIX: payerIsUser must be true for standard ERC20 approve+swap flow
     const abiCoder = AbiCoder.defaultAbiCoder();
     const input = abiCoder.encode(
       ['address', 'uint256', 'uint256', 'address[]', 'bool'],
-      [recipient, amountIn, minAmountOut, tokens, false]
+      [recipient, amountIn, minAmountOut, tokens, true] // true = tokens from msg.sender
     );
 
     const commands = solidityPacked(['uint8'], [Commands.V2_SWAP_EXACT_IN]);

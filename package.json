@@ -7,10 +7,12 @@
   "scripts": {
     "start": "node src/index.js",
     "selftest": "node tests/selftest.js",
+    "audit": "node src/audit-selfcheck.js",
     "test": "node tests/unit.test.js",
     "test:all": "npm run test && npm run selftest",
     "dry-run": "DRY_RUN=true node src/index.js",
-    "validate": "node validate-fixes.js"
+    "validate": "node validate-fixes.js",
+    "quicktest": "node src/selftest.js"
   },
   "keywords": [
     "mev",
